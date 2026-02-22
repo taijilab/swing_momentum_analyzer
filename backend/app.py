@@ -142,144 +142,229 @@ class SwingAnalyzer:
             momentum.append(mass * v)
         return momentum
 
-    def find_all_down_cycles(self, y_positions, momentums, fps, frames_buffer=None, shoulder_y=None):
+    def _smooth_positions(self, positions, window=9):
         """
-        找出所有左手手腕的落下动作
-        条件：手腕必须超过肩膀高度才算一次成功的甩手
+        高斯平滑位置数据，减少噪声
+        在计算速度前先平滑位置，可显著提高速度估算精度
+        """
+        if len(positions) < window:
+            return list(positions)
 
-        参数:
-        - y_positions: 手腕高度数组
-        - momentums: 动量数组
-        - fps: 帧率
-        - frames_buffer: 帧缓冲
-        - shoulder_y: 肩膀高度数组
+        half = window // 2
+        sigma = window / 5.0
+        weights = [np.exp(-0.5 * ((k - half) / sigma) ** 2) for k in range(window)]
+        w_total = sum(weights)
+        weights = [w / w_total for w in weights]
 
-        返回每次落下动作的记录列表
+        smoothed = []
+        for i in range(len(positions)):
+            if positions[i] is None:
+                smoothed.append(None)
+                continue
+            s, w_sum = 0.0, 0.0
+            for k in range(window):
+                j = i - half + k
+                if 0 <= j < len(positions) and positions[j] is not None:
+                    s += weights[k] * positions[j]
+                    w_sum += weights[k]
+            smoothed.append(s / w_sum if w_sum > 0 else None)
+        return smoothed
+
+    def _compute_velocity(self, positions, fps):
+        """
+        用中心差分法计算速度（比前向差分更精确）
+
+        坐标约定：positions 为高度百分比（0-100），值越大=手臂越高
+          velocity > 0  →  手臂向上运动
+          velocity < 0  →  手臂向下运动
+        """
+        n = len(positions)
+        dt = 1.0 / fps
+        velocity = []
+        for i in range(n):
+            if positions[i] is None:
+                velocity.append(0.0)
+                continue
+            prev_ok = i > 0 and positions[i - 1] is not None
+            next_ok = i < n - 1 and positions[i + 1] is not None
+            if prev_ok and next_ok:
+                v = (positions[i + 1] - positions[i - 1]) / (2.0 * dt)
+            elif prev_ok:
+                v = (positions[i] - positions[i - 1]) / dt
+            elif next_ok:
+                v = (positions[i + 1] - positions[i]) / dt
+            else:
+                v = 0.0
+            velocity.append(v)
+        return velocity
+
+    def find_all_down_cycles(self, y_positions, momentums, fps, frames_buffer=None, shoulder_y=None):
+        """向下落下动作检测（委托给 find_all_cycles，保持接口兼容）"""
+        down_cycles, _ = self.find_all_cycles(y_positions, fps, shoulder_y)
+        return down_cycles
+
+    def find_all_cycles(self, y_positions, fps, shoulder_y=None):
+        """
+        统一的上抬/落下周期检测状态机。
+
+        坐标约定（y_positions 为高度百分比 0-100）：
+          值越大  = 手臂越高
+          velocity > 0  = 手臂向上运动
+          velocity < 0  = 手臂向下运动
+
+        状态流转：
+          unknown → at_peak ←→ falling → at_trough ←→ rising → at_peak
+
+        返回: (down_cycles, up_cycles)
+          down_cycles: 每次落下（peak→trough）的数据
+          up_cycles:   每次上抬（trough→peak）的数据
         """
         if len(y_positions) < 20:
-            return []
+            return [], []
 
-        cycles = []
+        # ── 1. 高斯平滑位置，消除 MediaPipe 抖动噪声 ──────────────────────
+        smoothed_y = self._smooth_positions(y_positions, window=9)
 
-        # 使用速度来判断动作方向
-        velocity = self.calculate_velocity(y_positions, fps)
+        # ── 2. 中心差分计算速度（精度高于前向差分）──────────────────────────
+        velocity = self._compute_velocity(smoothed_y, fps)
 
-        # 平滑速度数据
-        window = 5
-        smoothed_velocity = []
-        for i in range(len(velocity)):
-            start = max(0, i - window // 2)
-            end = min(len(velocity), i + window // 2 + 1)
-            smoothed_velocity.append(sum(velocity[start:end]) / (end - start))
+        # ── 3. 阈值设定 ──────────────────────────────────────────────────────
+        VEL_THRESHOLD = 8.0      # height%/s，触发方向判定的最小速度
+        HIGH_THRESHOLD = 55.0    # 高于此值视为"高位"
+        LOW_THRESHOLD = 45.0     # 低于此值视为"低位"
+        MIN_HEIGHT_CHANGE = 8.0  # 有效周期的最小幅度（%）
 
-        # 状态机检测落下动作
+        down_cycles = []
+        up_cycles = []
+
         state = 'unknown'
+        peak_frame, peak_y = None, None
+        trough_frame, trough_y = None, None
 
-        # 记录当前动作的关键点
-        action_start_frame = None
-        peak_frame = None
-        peak_y = None
-        peak_above_shoulder = False  # 高点是否超过肩膀
-        trough_frame = None
-        trough_y = None
-
-        # 设定阈值
-        HIGH_THRESHOLD = 55
-        LOW_THRESHOLD = 48
-
-        for i in range(len(y_positions)):
-            if y_positions[i] is None:
+        for i in range(len(smoothed_y)):
+            if smoothed_y[i] is None:
                 continue
 
-            current_y = y_positions[i]
-            current_vel = smoothed_velocity[i] if i < len(smoothed_velocity) else 0
+            y = smoothed_y[i]
+            v = velocity[i]
+            shoulder = (shoulder_y[i]
+                        if shoulder_y and i < len(shoulder_y) and shoulder_y[i] is not None
+                        else None)
 
-            # 获取当前帧的肩膀高度
-            current_shoulder_y = shoulder_y[i] if shoulder_y and i < len(shoulder_y) else None
-
+            # ── 初始状态：根据当前位置确定起点 ───────────────────────────────
             if state == 'unknown':
-                if current_y > HIGH_THRESHOLD:
+                if y >= HIGH_THRESHOLD:
                     state = 'at_peak'
-                    peak_frame = i
-                    peak_y = current_y
-                    action_start_frame = i
-                    if current_shoulder_y:
-                        peak_above_shoulder = current_y > current_shoulder_y
+                    peak_frame, peak_y = i, y
+                    trough_frame, trough_y = None, None
+                elif y <= LOW_THRESHOLD:
+                    state = 'at_trough'
+                    trough_frame, trough_y = i, y
+                    peak_frame, peak_y = None, None
 
+            # ── 高位等待：持续更新最高点，等待开始下落 ───────────────────────
             elif state == 'at_peak':
-                if current_y > peak_y:
-                    peak_frame = i
-                    peak_y = current_y
-                    action_start_frame = i
-                    if current_shoulder_y:
-                        peak_above_shoulder = current_y > current_shoulder_y
-
-                if current_vel > 12:
+                if y > peak_y:
+                    peak_frame, peak_y = i, y
+                # 速度明显向下 → 开始落下
+                if v < -VEL_THRESHOLD:
                     state = 'falling'
+                    trough_frame, trough_y = i, y  # 初始化低点跟踪
 
+            # ── 下落中：持续追踪最低点，等待速度反转 ────────────────────────
             elif state == 'falling':
-                if trough_frame is None or current_y < trough_y:
-                    trough_frame = i
-                    trough_y = current_y
-
-                if current_vel < -12 or current_y < LOW_THRESHOLD:
+                if y < trough_y:
+                    trough_frame, trough_y = i, y
+                # 速度反转（向上）或已到低位 → 结束本次落下
+                if v > VEL_THRESHOLD / 2 or y <= LOW_THRESHOLD:
                     if peak_frame is not None and trough_frame is not None:
-                        height_change = peak_y - trough_y if peak_y and trough_y else 0
+                        height_change = peak_y - trough_y
+                        above_shoulder = (shoulder is None or peak_y > shoulder)
+                        if height_change >= MIN_HEIGHT_CHANGE:
+                            # 只取落下阶段的负速度（向下）
+                            phase_vels = [velocity[k]
+                                          for k in range(peak_frame, trough_frame + 1)
+                                          if k < len(velocity) and velocity[k] < 0]
+                            avg_down = abs(sum(phase_vels) / len(phase_vels)) if phase_vels else 0.0
+                            max_down = abs(min(phase_vels)) if phase_vels else 0.0
+                            duration = (trough_frame - peak_frame) / fps
 
-                        # 只有手腕超过肩膀的高度变化才计入
-                        if peak_above_shoulder and height_change >= 8:
-                            fall_momentums = [m for m in momentums[peak_frame:trough_frame+1] if m > 0]
-                            max_momentum = max(fall_momentums) if fall_momentums else 0
-                            duration = (trough_frame - peak_frame) / fps if trough_frame > peak_frame else 0
-
-                            cycle_info = {
-                                'cycle_number': len(cycles) + 1,
-                                'start_frame': action_start_frame,
+                            down_cycles.append({
+                                'cycle_number': len(down_cycles) + 1,
+                                'type': 'down',
+                                'start_frame': peak_frame,
                                 'peak_frame': peak_frame,
                                 'trough_frame': trough_frame,
-                                'peak_y': peak_y,
-                                'trough_y': trough_y,
-                                'height_change': height_change,
-                                'max_momentum': max_momentum,
-                                'duration': duration,
-                                'above_shoulder': peak_above_shoulder
-                            }
-                            cycles.append(cycle_info)
-
-                            logger.info(f"[左手落下 #{len(cycles)}] "
-                                      f"开始帧{action_start_frame}, 高点帧{peak_frame}(高度{peak_y:.1f}%, 超肩:{'是' if peak_above_shoulder else '否'}) -> "
-                                      f"低点帧{trough_frame}(高度{trough_y:.1f}%), "
-                                      f"高度差={height_change:.1f}%, 动量={max_momentum:.2f}, 时长={duration:.2f}s")
+                                'peak_y': float(peak_y),
+                                'trough_y': float(trough_y),
+                                'height_change': float(height_change),
+                                'avg_momentum': float(avg_down),
+                                'max_momentum': float(max_down),
+                                'duration': float(duration),
+                                'above_shoulder': bool(above_shoulder)
+                            })
+                            logger.info(
+                                f"[落下 #{len(down_cycles)}] "
+                                f"高点帧{peak_frame}(Y={peak_y:.1f}%) → "
+                                f"低点帧{trough_frame}(Y={trough_y:.1f}%), "
+                                f"幅度={height_change:.1f}%, "
+                                f"平均动量={avg_down:.2f}, 峰值动量={max_down:.2f}"
+                            )
 
                     state = 'at_trough'
+                    peak_frame, peak_y = None, None
 
+            # ── 低位等待：持续更新最低点，等待开始上抬 ───────────────────────
             elif state == 'at_trough':
-                if current_vel < -12:
-                    state = 'raising'
-                if current_y > HIGH_THRESHOLD:
-                    state = 'at_peak'
-                    peak_frame = i
-                    peak_y = current_y
-                    action_start_frame = i
-                    peak_above_shoulder = False
-                    if current_shoulder_y:
-                        peak_above_shoulder = current_y > current_shoulder_y
-                    trough_frame = None
-                    trough_y = None
+                if trough_frame is None or y < trough_y:
+                    trough_frame, trough_y = i, y
+                # 速度明显向上 → 开始上抬
+                if v > VEL_THRESHOLD:
+                    state = 'rising'
+                    peak_frame, peak_y = i, y  # 初始化高点跟踪
 
-            elif state == 'raising':
-                if current_y > HIGH_THRESHOLD and abs(current_vel) < 8:
-                    state = 'at_peak'
-                    peak_frame = i
-                    peak_y = current_y
-                    action_start_frame = i
-                    peak_above_shoulder = False
-                    if current_shoulder_y:
-                        peak_above_shoulder = current_y > current_shoulder_y
-                    trough_frame = None
-                    trough_y = None
+            # ── 上抬中：持续追踪最高点，等待速度反转 ────────────────────────
+            elif state == 'rising':
+                if peak_frame is None or y > peak_y:
+                    peak_frame, peak_y = i, y
+                # 速度反转（向下）或已到高位 → 结束本次上抬
+                if v < -VEL_THRESHOLD / 2 or y >= HIGH_THRESHOLD:
+                    if trough_frame is not None and peak_frame is not None:
+                        height_change = peak_y - trough_y
+                        if height_change >= MIN_HEIGHT_CHANGE:
+                            # 只取上抬阶段的正速度（向上）
+                            phase_vels = [velocity[k]
+                                          for k in range(trough_frame, peak_frame + 1)
+                                          if k < len(velocity) and velocity[k] > 0]
+                            avg_up = sum(phase_vels) / len(phase_vels) if phase_vels else 0.0
+                            max_up = max(phase_vels) if phase_vels else 0.0
+                            duration = (peak_frame - trough_frame) / fps
 
-        return cycles
+                            up_cycles.append({
+                                'cycle_number': len(up_cycles) + 1,
+                                'type': 'up',
+                                'start_frame': trough_frame,
+                                'trough_frame': trough_frame,
+                                'peak_frame': peak_frame,
+                                'trough_y': float(trough_y),
+                                'peak_y': float(peak_y),
+                                'height_change': float(height_change),
+                                'avg_momentum': float(avg_up),
+                                'max_momentum': float(max_up),
+                                'duration': float(duration)
+                            })
+                            logger.info(
+                                f"[上抬 #{len(up_cycles)}] "
+                                f"低点帧{trough_frame}(Y={trough_y:.1f}%) → "
+                                f"高点帧{peak_frame}(Y={peak_y:.1f}%), "
+                                f"幅度={height_change:.1f}%, "
+                                f"平均动量={avg_up:.2f}, 峰值动量={max_up:.2f}"
+                            )
+
+                    state = 'at_peak'
+                    trough_frame, trough_y = None, None
+
+        return down_cycles, up_cycles
 
     def find_max_down_momentum_cycle(self, y_positions, momentums, fps, frames_buffer=None):
         """
@@ -720,7 +805,7 @@ class SwingAnalyzer:
         self.data['right_momentum'] = self.calculate_momentum(
             self.data['right_velocity'], mass=1.0)
 
-        # 检测甩手周期
+        # 检测甩手周期（保留旧字段兼容性）
         left_cycles = self.detect_swing_cycles(
             self.data['left_wrist_y'], self.data['left_velocity'])
         right_cycles = self.detect_swing_cycles(
@@ -731,50 +816,57 @@ class SwingAnalyzer:
             'right': right_cycles
         }
 
-        # 计算统计信息
+        # ── 新：用统一状态机分别检测左右手的上抬/落下周期 ──────────────────
+        left_down, left_up = self.find_all_cycles(
+            self.data['left_wrist_y'], fps, self.data['left_shoulder_y'])
+        right_down, right_up = self.find_all_cycles(
+            self.data['right_wrist_y'], fps, self.data['right_shoulder_y'])
+
+        self.data['left_down_cycles'] = left_down
+        self.data['left_up_cycles'] = left_up
+        self.data['right_down_cycles'] = right_down
+        self.data['right_up_cycles'] = right_up
+
+        # 计算统计信息（现在包含周期级数据）
         self.data['stats'] = self._calculate_stats()
 
         # 提取完整甩手周期的关键帧
         if output_frames_dir and frames_buffer:
             logger.info("正在提取关键帧...")
 
-            # 使用左手数据提取关键帧（如果左手数据不可用则用右手）
-            y_data = self.data['left_wrist_y']
-            momentum_data = self.data['left_momentum']
-
-            # 获取肩膀数据
-            shoulder_data = self.data['left_shoulder_y']
-
-            # 检查数据有效性，左手数据不足则用右手
-            valid_left = sum(1 for y in y_data if y is not None) > len(y_data) * 0.5
-            if not valid_left:
+            # 优先使用左手数据，左手检测不足时改用右手
+            valid_left = sum(1 for y in self.data['left_wrist_y'] if y is not None) > len(self.data['left_wrist_y']) * 0.5
+            if valid_left:
+                y_data = self.data['left_wrist_y']
+                momentum_data = self.data['left_momentum']
+                all_down_cycles = self.data['left_down_cycles']
+                all_up_cycles = self.data['left_up_cycles']
+            else:
                 y_data = self.data['right_wrist_y']
                 momentum_data = self.data['right_momentum']
-                shoulder_data = self.data['right_shoulder_y']
+                all_down_cycles = self.data['right_down_cycles']
+                all_up_cycles = self.data['right_up_cycles']
 
-            # 记录所有落下动作（只关注左手，需要超过肩膀）
-            all_cycles = self.find_all_down_cycles(y_data, momentum_data, fps, frames_buffer, shoulder_data)
+            # 生成动作日志文件 (CSV格式)，包含上抬和落下
+            log_file_path = os.path.join(output_frames_dir, "down_cycles_log.csv")
+            self._save_cycles_log(all_down_cycles, all_up_cycles, log_file_path, fps)
+            logger.info(f"已记录 {len(all_down_cycles)} 次落下 / {len(all_up_cycles)} 次上抬 到 CSV 日志文件")
 
-            # 生成落下动作日志文件 (CSV格式)
-            if all_cycles:
-                log_file_path = os.path.join(output_frames_dir, "down_cycles_log.csv")
-                self._save_down_cycles_log(all_cycles, log_file_path, fps)
-                logger.info(f"已记录 {len(all_cycles)} 次左手落下动作到 CSV 日志文件")
-
-            # 提取关键帧（最大动量动作），传入所有动作数据
+            # 提取关键帧（最大落下动量动作）
             key_frames_data = self.extract_key_frames(
-                frames_buffer, y_data, momentum_data, output_frames_dir, fps, all_cycles
+                frames_buffer, y_data, momentum_data, output_frames_dir, fps, all_down_cycles
             )
 
             self.data['key_frames'] = key_frames_data
-            self.data['all_down_cycles'] = all_cycles  # 保留用于直接访问
+            self.data['all_down_cycles'] = all_down_cycles
+            self.data['all_up_cycles'] = all_up_cycles
             logger.info("关键帧提取完成")
 
         logger.info(f"分析完成！共处理 {frame_idx} 帧")
         return self.data
 
     def _calculate_stats(self):
-        """计算统计信息"""
+        """计算统计信息，包含逐周期的上抬/落下动量数据"""
         stats = {
             'left': {},
             'right': {}
@@ -795,53 +887,102 @@ class SwingAnalyzer:
                 stats[side]['max_momentum_up'] = float(min(momentum_data))
                 stats[side]['avg_momentum'] = float(sum(momentum_data) / len(momentum_data))
 
+            # 逐周期统计：落下
+            down_cycles = self.data.get(f'{side}_down_cycles', [])
+            stats[side]['down_cycle_count'] = len(down_cycles)
+            if down_cycles:
+                stats[side]['avg_down_momentum'] = float(
+                    sum(c['avg_momentum'] for c in down_cycles) / len(down_cycles))
+                stats[side]['max_down_cycle_momentum'] = float(
+                    max(c['max_momentum'] for c in down_cycles))
+            else:
+                stats[side]['avg_down_momentum'] = 0.0
+                stats[side]['max_down_cycle_momentum'] = 0.0
+
+            # 逐周期统计：上抬
+            up_cycles = self.data.get(f'{side}_up_cycles', [])
+            stats[side]['up_cycle_count'] = len(up_cycles)
+            if up_cycles:
+                stats[side]['avg_up_momentum'] = float(
+                    sum(c['avg_momentum'] for c in up_cycles) / len(up_cycles))
+                stats[side]['max_up_cycle_momentum'] = float(
+                    max(c['max_momentum'] for c in up_cycles))
+            else:
+                stats[side]['avg_up_momentum'] = 0.0
+                stats[side]['max_up_cycle_momentum'] = 0.0
+
         return stats
 
     def _save_down_cycles_log(self, cycles, log_file_path, fps):
-        """保存落下动作记录到 CSV 格式日志文件"""
+        """兼容旧调用：仅传入落下周期时的封装"""
+        self._save_cycles_log(cycles, [], log_file_path, fps)
+
+    def _save_cycles_log(self, down_cycles, up_cycles, log_file_path, fps):
+        """
+        保存上抬和落下动作记录到 CSV 日志文件。
+        两类动作按时间顺序合并，并输出分类统计摘要。
+        """
         import csv
+
+        # 合并并按起始帧排序
+        all_records = []
+        for c in down_cycles:
+            all_records.append({**c, '_label': '落下↓'})
+        for c in up_cycles:
+            all_records.append({**c, '_label': '上抬↑'})
+        all_records.sort(key=lambda x: x.get('start_frame', 0))
 
         with open(log_file_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
 
-            # 写入表头
+            # 表头
             writer.writerow([
-                '序号',
-                '开始帧',
-                '高点帧',
-                '低点帧',
-                '高度差(%)',
-                '落下动量(kg·m/s)',
-                '动作时长(秒)'
+                '序号', '动作类型',
+                '起始帧', '高点帧', '低点帧',
+                '幅度(%)', '平均动量(kg·m/s)', '峰值动量(kg·m/s)', '时长(秒)'
             ])
 
-            # 写入每次动作记录
-            for cycle in cycles:
+            for idx, c in enumerate(all_records, 1):
                 writer.writerow([
-                    cycle['cycle_number'],
-                    cycle['start_frame'],
-                    cycle['peak_frame'],
-                    cycle['trough_frame'],
-                    f"{cycle['height_change']:.2f}",
-                    f"{cycle['max_momentum']:.2f}",
-                    f"{cycle['duration']:.2f}"
+                    idx,
+                    c['_label'],
+                    c.get('start_frame', ''),
+                    c.get('peak_frame', ''),
+                    c.get('trough_frame', ''),
+                    f"{c['height_change']:.2f}",
+                    f"{c['avg_momentum']:.2f}",
+                    f"{c['max_momentum']:.2f}",
+                    f"{c['duration']:.2f}"
                 ])
 
-            # 添加统计摘要
-            if cycles:
-                writer.writerow([])
-                writer.writerow(['=== 统计摘要 ==='])
-                writer.writerow(['总动作次数', len(cycles)])
-                writer.writerow(['平均高度差(%)', f"{sum(c['height_change'] for c in cycles) / len(cycles):.2f}"])
-                writer.writerow(['平均动量(kg·m/s)', f"{sum(c['max_momentum'] for c in cycles) / len(cycles):.2f}"])
-                writer.writerow(['平均时长(秒)', f"{sum(c['duration'] for c in cycles) / len(cycles):.2f}"])
-                writer.writerow(['最大高度差(%)', f"{max(c['height_change'] for c in cycles):.2f}"])
-                writer.writerow(['最大动量(kg·m/s)', f"{max(c['max_momentum'] for c in cycles):.2f}"])
-                writer.writerow([])
-                writer.writerow(['=== 说明 ==='])
-                writer.writerow(['动量计算: p = m × v (动量 = 质量 × 速度)'])
-                writer.writerow(['质量假设: m = 1 kg'])
-                writer.writerow(['检测对象: 左手手腕的落下动作'])
+            # 统计摘要
+            writer.writerow([])
+            writer.writerow(['=== 统计摘要 ==='])
+            writer.writerow(['落下动作次数', len(down_cycles)])
+            writer.writerow(['上抬动作次数', len(up_cycles)])
+
+            if down_cycles:
+                writer.writerow(['落下平均幅度(%)',
+                                  f"{sum(c['height_change'] for c in down_cycles) / len(down_cycles):.2f}"])
+                writer.writerow(['落下平均动量(kg·m/s)',
+                                  f"{sum(c['avg_momentum'] for c in down_cycles) / len(down_cycles):.2f}"])
+                writer.writerow(['落下峰值动量(kg·m/s)',
+                                  f"{max(c['max_momentum'] for c in down_cycles):.2f}"])
+
+            if up_cycles:
+                writer.writerow(['上抬平均幅度(%)',
+                                  f"{sum(c['height_change'] for c in up_cycles) / len(up_cycles):.2f}"])
+                writer.writerow(['上抬平均动量(kg·m/s)',
+                                  f"{sum(c['avg_momentum'] for c in up_cycles) / len(up_cycles):.2f}"])
+                writer.writerow(['上抬峰值动量(kg·m/s)',
+                                  f"{max(c['max_momentum'] for c in up_cycles):.2f}"])
+
+            writer.writerow([])
+            writer.writerow(['=== 说明 ==='])
+            writer.writerow(['动量计算: p = m × v，速度由高斯平滑位置的中心差分得出'])
+            writer.writerow(['质量假设: m = 1 kg'])
+            writer.writerow(['落下动量: 取落下阶段负速度的绝对值均值/峰值'])
+            writer.writerow(['上抬动量: 取上抬阶段正速度的均值/峰值'])
 
 
 # 创建全局分析器实例
@@ -896,7 +1037,8 @@ def upload_video():
                 'right_momentum': result.get('right_momentum', [])[:1000],
                 'frames': result.get('frames', [])[:1000],
                 'key_frames': result.get('key_frames', {}),
-                'all_down_cycles': result.get('all_down_cycles', [])  # 所有落下动作记录
+                'all_down_cycles': result.get('all_down_cycles', []),
+                'all_up_cycles': result.get('all_up_cycles', [])
             }
 
             # 读取日志文件内容
@@ -909,9 +1051,11 @@ def upload_video():
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(clean_result, f, ensure_ascii=False, indent=2)
 
+            n_down = len(result.get('all_down_cycles', []))
+            n_up = len(result.get('all_up_cycles', []))
             return jsonify({
                 'success': True,
-                'message': f'分析完成，检测到 {len(result.get("all_down_cycles", []))} 次落下动作',
+                'message': f'分析完成，检测到 {n_down} 次落下、{n_up} 次上抬动作',
                 'data': clean_result,
                 'log_content': log_content,  # 添加日志内容
                 'original_video': f"/uploads/{filename}",

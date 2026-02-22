@@ -160,10 +160,9 @@ function displayKeyFrames(keyFrames) {
     const motionContainer = document.getElementById('motionContainer');
     const cyclesTableCard = document.getElementById('cyclesTableCard');
 
-    // 检查是否有向下运动数据
     const hasMotion = keyFrames.max_down_motion &&
-                     keyFrames.max_down_motion.high_point &&
-                     keyFrames.max_down_motion.low_point;
+                      keyFrames.max_down_motion.high_point &&
+                      keyFrames.max_down_motion.low_point;
 
     if (!hasMotion) {
         keyframesSection.style.display = 'none';
@@ -174,32 +173,49 @@ function displayKeyFrames(keyFrames) {
 
     const motion = keyFrames.max_down_motion;
 
-    // 显示所有落下动作记录表格
-    if (keyFrames.all_down_cycles && keyFrames.all_down_cycles.length > 0) {
+    // ── 合并上抬和落下周期，按起始帧排序 ────────────────────────────────
+    const downCycles = (keyFrames.all_down_cycles || []).map(c => ({ ...c, _type: 'down' }));
+    const upCycles   = (currentAnalysisData.all_up_cycles || []).map(c => ({ ...c, _type: 'up' }));
+    const allCycles  = [...downCycles, ...upCycles].sort(
+        (a, b) => (a.start_frame || 0) - (b.start_frame || 0)
+    );
+
+    if (allCycles.length > 0) {
         cyclesTableCard.style.display = 'block';
-        document.getElementById('totalCycles').textContent = keyFrames.all_down_cycles.length;
+        document.getElementById('totalCycles').textContent = allCycles.length;
 
         const tbody = document.getElementById('cyclesTableBody');
         tbody.innerHTML = '';
 
-        keyFrames.all_down_cycles.forEach((cycle, index) => {
+        allCycles.forEach((cycle, idx) => {
             const row = document.createElement('tr');
-            // 标记最大动量的动作（使用峰值帧匹配）
-            if (cycle.peak_frame === motion.high_point.frame && cycle.trough_frame === motion.low_point.frame) {
+
+            const isDown = cycle._type === 'down';
+            // 标记最大落下动量动作
+            if (isDown &&
+                cycle.peak_frame === motion.high_point.frame &&
+                cycle.trough_frame === motion.low_point.frame) {
                 row.classList.add('highlight-cycle');
             }
 
-            // 添加点击事件：跳转到视频对应帧并播放片段
+            // 颜色样式
+            row.classList.add(isDown ? 'cycle-down' : 'cycle-up');
             row.style.cursor = 'pointer';
-            row.onclick = () => seekVideoToFrame(cycle.start_frame, cycle.trough_frame);
-            row.title = `点击播放：帧 ${cycle.start_frame} -> ${cycle.trough_frame}`;
+
+            const endFrame = isDown ? cycle.trough_frame : cycle.peak_frame;
+            row.onclick = () => seekVideoToFrame(cycle.start_frame, endFrame);
+            row.title = `点击播放：帧 ${cycle.start_frame} → ${endFrame}`;
+
+            const typeLabel = isDown ? '↓ 落下' : '↑ 上抬';
 
             row.innerHTML = `
-                <td>${cycle.cycle_number}</td>
+                <td>${idx + 1}</td>
+                <td><span class="type-badge ${isDown ? 'badge-down' : 'badge-up'}">${typeLabel}</span></td>
                 <td>${cycle.start_frame}</td>
-                <td>${cycle.peak_frame}</td>
-                <td>${cycle.trough_frame}</td>
+                <td>${cycle.peak_frame !== undefined ? cycle.peak_frame : '-'}</td>
+                <td>${cycle.trough_frame !== undefined ? cycle.trough_frame : '-'}</td>
                 <td>${cycle.height_change.toFixed(1)}%</td>
+                <td>${cycle.avg_momentum.toFixed(2)} kg·m/s</td>
                 <td>${cycle.max_momentum.toFixed(2)} kg·m/s</td>
                 <td>${cycle.duration.toFixed(2)} s</td>
             `;
@@ -209,24 +225,21 @@ function displayKeyFrames(keyFrames) {
         cyclesTableCard.style.display = 'none';
     }
 
-    // 显示最大动量动作的两张图片
+    // ── 显示最大落下动量关键帧图片 ───────────────────────────────────────
     motionContainer.style.display = 'block';
 
-    // 设置高点图片
     const highImg = document.getElementById('highPointImage');
     highImg.src = `data:image/jpeg;base64,${motion.high_point.image}`;
     highImg.onclick = () => showImageModal(motion.high_point.image, '高点 - 手臂举起');
     document.getElementById('highPointHeight').textContent = motion.high_point.height.toFixed(1) + '%';
     document.getElementById('highPointFrame').textContent = motion.high_point.frame;
 
-    // 设置低点图片
     const lowImg = document.getElementById('lowPointImage');
     lowImg.src = `data:image/jpeg;base64,${motion.low_point.image}`;
     lowImg.onclick = () => showImageModal(motion.low_point.image, '低点 - 手臂下垂');
     document.getElementById('lowPointHeight').textContent = motion.low_point.height.toFixed(1) + '%';
     document.getElementById('lowPointFrame').textContent = motion.low_point.frame;
 
-    // 设置统计数据
     document.getElementById('connectorDuration').textContent = motion.duration.toFixed(1) + 's';
     document.getElementById('motionDuration').textContent = motion.duration.toFixed(2) + ' 秒';
     document.getElementById('motionMomentum').textContent = motion.momentum.toFixed(2) + ' kg·m/s';
@@ -263,21 +276,41 @@ function showImageModal(base64Image, title) {
 
 // 更新统计数据
 function updateStats(stats) {
-    const formatNum = (num) => num ? num.toFixed(2) : '-';
+    const fmt = (num) => (num !== undefined && num !== null) ? num.toFixed(2) : '-';
 
-    // 左手数据
-    document.getElementById('leftMaxHeight').textContent = formatNum(stats.left.max_height) + ' %';
-    document.getElementById('leftMinHeight').textContent = formatNum(stats.left.min_height) + ' %';
-    document.getElementById('leftRange').textContent = formatNum(stats.left.range) + ' %';
-    document.getElementById('leftMaxMomentumDown').textContent = formatNum(stats.left.max_momentum_down) + ' kg·m/s';
-    document.getElementById('leftMaxMomentumUp').textContent = formatNum(stats.left.max_momentum_up) + ' kg·m/s';
+    // 左手：高度
+    document.getElementById('leftMaxHeight').textContent = fmt(stats.left.max_height) + ' %';
+    document.getElementById('leftMinHeight').textContent = fmt(stats.left.min_height) + ' %';
+    document.getElementById('leftRange').textContent = fmt(stats.left.range) + ' %';
 
-    // 右手数据
-    document.getElementById('rightMaxHeight').textContent = formatNum(stats.right.max_height) + ' %';
-    document.getElementById('rightMinHeight').textContent = formatNum(stats.right.min_height) + ' %';
-    document.getElementById('rightRange').textContent = formatNum(stats.right.range) + ' %';
-    document.getElementById('rightMaxMomentumDown').textContent = formatNum(stats.right.max_momentum_down) + ' kg·m/s';
-    document.getElementById('rightMaxMomentumUp').textContent = formatNum(stats.right.max_momentum_up) + ' kg·m/s';
+    // 左手：落下周期统计
+    const ldCount = stats.left.down_cycle_count || 0;
+    const ldMax = fmt(stats.left.max_down_cycle_momentum);
+    document.getElementById('leftDownStat').textContent = `${ldCount} 次 / ${ldMax} kg·m/s`;
+    document.getElementById('leftAvgDownMomentum').textContent = fmt(stats.left.avg_down_momentum) + ' kg·m/s';
+
+    // 左手：上抬周期统计
+    const luCount = stats.left.up_cycle_count || 0;
+    const luMax = fmt(stats.left.max_up_cycle_momentum);
+    document.getElementById('leftUpStat').textContent = `${luCount} 次 / ${luMax} kg·m/s`;
+    document.getElementById('leftAvgUpMomentum').textContent = fmt(stats.left.avg_up_momentum) + ' kg·m/s';
+
+    // 右手：高度
+    document.getElementById('rightMaxHeight').textContent = fmt(stats.right.max_height) + ' %';
+    document.getElementById('rightMinHeight').textContent = fmt(stats.right.min_height) + ' %';
+    document.getElementById('rightRange').textContent = fmt(stats.right.range) + ' %';
+
+    // 右手：落下周期统计
+    const rdCount = stats.right.down_cycle_count || 0;
+    const rdMax = fmt(stats.right.max_down_cycle_momentum);
+    document.getElementById('rightDownStat').textContent = `${rdCount} 次 / ${rdMax} kg·m/s`;
+    document.getElementById('rightAvgDownMomentum').textContent = fmt(stats.right.avg_down_momentum) + ' kg·m/s';
+
+    // 右手：上抬周期统计
+    const ruCount = stats.right.up_cycle_count || 0;
+    const ruMax = fmt(stats.right.max_up_cycle_momentum);
+    document.getElementById('rightUpStat').textContent = `${ruCount} 次 / ${ruMax} kg·m/s`;
+    document.getElementById('rightAvgUpMomentum').textContent = fmt(stats.right.avg_up_momentum) + ' kg·m/s';
 }
 
 // 绘制图表

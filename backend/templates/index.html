@@ -62,13 +62,21 @@
                             <span class="stat-label">活动范围</span>
                             <span class="stat-value" id="leftRange">-</span>
                         </div>
-                        <div class="stat-item highlight">
-                            <span class="stat-label">最大向下动量</span>
-                            <span class="stat-value" id="leftMaxMomentumDown">-</span>
+                        <div class="stat-item highlight down-stat">
+                            <span class="stat-label">落下次数 / 峰值动量</span>
+                            <span class="stat-value" id="leftDownStat">-</span>
                         </div>
-                        <div class="stat-item highlight">
-                            <span class="stat-label">最大向上动量</span>
-                            <span class="stat-value" id="leftMaxMomentumUp">-</span>
+                        <div class="stat-item highlight down-stat">
+                            <span class="stat-label">落下平均动量</span>
+                            <span class="stat-value" id="leftAvgDownMomentum">-</span>
+                        </div>
+                        <div class="stat-item highlight up-stat">
+                            <span class="stat-label">上抬次数 / 峰值动量</span>
+                            <span class="stat-value" id="leftUpStat">-</span>
+                        </div>
+                        <div class="stat-item highlight up-stat">
+                            <span class="stat-label">上抬平均动量</span>
+                            <span class="stat-value" id="leftAvgUpMomentum">-</span>
                         </div>
                     </div>
 
@@ -86,13 +94,21 @@
                             <span class="stat-label">活动范围</span>
                             <span class="stat-value" id="rightRange">-</span>
                         </div>
-                        <div class="stat-item highlight">
-                            <span class="stat-label">最大向下动量</span>
-                            <span class="stat-value" id="rightMaxMomentumDown">-</span>
+                        <div class="stat-item highlight down-stat">
+                            <span class="stat-label">落下次数 / 峰值动量</span>
+                            <span class="stat-value" id="rightDownStat">-</span>
                         </div>
-                        <div class="stat-item highlight">
-                            <span class="stat-label">最大向上动量</span>
-                            <span class="stat-value" id="rightMaxMomentumUp">-</span>
+                        <div class="stat-item highlight down-stat">
+                            <span class="stat-label">落下平均动量</span>
+                            <span class="stat-value" id="rightAvgDownMomentum">-</span>
+                        </div>
+                        <div class="stat-item highlight up-stat">
+                            <span class="stat-label">上抬次数 / 峰值动量</span>
+                            <span class="stat-value" id="rightUpStat">-</span>
+                        </div>
+                        <div class="stat-item highlight up-stat">
+                            <span class="stat-label">上抬平均动量</span>
+                            <span class="stat-value" id="rightAvgUpMomentum">-</span>
                         </div>
                     </div>
                 </div>
@@ -139,7 +155,7 @@
                             <!-- 所有落下动作记录表格 -->
                             <div class="cycles-table-card" id="cyclesTableCard" style="display: none;">
                                 <div class="table-header">
-                                    <h4>📋 所有落下动作记录（点击行跳转视频）</h4>
+                                    <h4>📋 所有动作记录（点击行跳转视频）</h4>
                                     <span class="total-count">共 <span id="totalCycles">0</span> 次动作</span>
                                 </div>
                                 <div class="table-wrapper">
@@ -147,11 +163,13 @@
                                         <thead>
                                             <tr>
                                                 <th>序号</th>
-                                                <th>开始帧</th>
+                                                <th>类型</th>
+                                                <th>起始帧</th>
                                                 <th>高点帧</th>
                                                 <th>低点帧</th>
-                                                <th>高度差</th>
-                                                <th>落下动量</th>
+                                                <th>幅度</th>
+                                                <th>平均动量</th>
+                                                <th>峰值动量</th>
                                                 <th>时长</th>
                                             </tr>
                                         </thead>
