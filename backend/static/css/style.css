@@ -420,8 +420,64 @@ header p {
     color: #ea580c;
 }
 
+/* 落下行：浅橙色背景 */
+.cycles-table tbody tr.cycle-down {
+    background: rgba(249, 115, 22, 0.04);
+}
+.cycles-table tbody tr.cycle-down:hover {
+    background: rgba(249, 115, 22, 0.12);
+}
+
+/* 上抬行：浅蓝色背景 */
+.cycles-table tbody tr.cycle-up {
+    background: rgba(59, 130, 246, 0.04);
+}
+.cycles-table tbody tr.cycle-up:hover {
+    background: rgba(59, 130, 246, 0.12);
+}
+
+/* 动作类型徽章 */
+.type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.badge-down {
+    background: #fff3e0;
+    color: #ea580c;
+    border: 1px solid #fed7aa;
+}
+.badge-up {
+    background: #eff6ff;
+    color: #2563eb;
+    border: 1px solid #bfdbfe;
+}
+
 .cycles-table tbody tr:hover {
     background: #f8fafc;
+}
+
+/* 统计卡片：落下/上抬颜色区分 */
+.stat-item.down-stat {
+    background: rgba(249, 115, 22, 0.07);
+    margin: 0 -0.5rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 6px;
+}
+.stat-item.down-stat .stat-value {
+    color: #ea580c;
+}
+.stat-item.up-stat {
+    background: rgba(59, 130, 246, 0.07);
+    margin: 0 -0.5rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 6px;
+}
+.stat-item.up-stat .stat-value {
+    color: #2563eb;
 }
 
 /* Log File Card */
