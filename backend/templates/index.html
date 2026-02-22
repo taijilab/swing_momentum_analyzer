@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>甩手动量分析器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎯 甩手动量分析器</h1>
+            <p>上传视频，自动检测甩手动作并计算动量值</p>
+        </header>
+
+        <main>
+            <!-- 上传区域 -->
+            <section class="upload-section" id="uploadSection">
+                <div class="upload-area" id="uploadArea">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <h3>拖拽视频到此处或点击上传</h3>
+                    <p class="upload-hint">支持 MP4, AVI, MOV, MKV 格式，最大 100MB</p>
+                    <input type="file" id="videoInput" accept="video/*" hidden>
+                    <button class="btn-primary" onclick="document.getElementById('videoInput').click()">
+                        选择视频文件
+                    </button>
+                </div>
+            </section>
+
+            <!-- 进度显示 -->
+            <section class="progress-section" id="progressSection" style="display: none;">
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p class="progress-text" id="progressText">正在上传和分析视频...</p>
+                </div>
+            </section>
+
+            <!-- 分析结果 -->
+            <section class="results-section" id="resultsSection" style="display: none;">
+                <h2>📊 分析结果</h2>
+
+                <!-- 统计卡片 -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>👈 左手</h3>
+                        <div class="stat-item">
+                            <span class="stat-label">最大高度</span>
+                            <span class="stat-value" id="leftMaxHeight">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">最小高度</span>
+                            <span class="stat-value" id="leftMinHeight">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">活动范围</span>
+                            <span class="stat-value" id="leftRange">-</span>
+                        </div>
+                        <div class="stat-item highlight">
+                            <span class="stat-label">最大向下动量</span>
+                            <span class="stat-value" id="leftMaxMomentumDown">-</span>
+                        </div>
+                        <div class="stat-item highlight">
+                            <span class="stat-label">最大向上动量</span>
+                            <span class="stat-value" id="leftMaxMomentumUp">-</span>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3>👉 右手</h3>
+                        <div class="stat-item">
+                            <span class="stat-label">最大高度</span>
+                            <span class="stat-value" id="rightMaxHeight">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">最小高度</span>
+                            <span class="stat-value" id="rightMinHeight">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">活动范围</span>
+                            <span class="stat-value" id="rightRange">-</span>
+                        </div>
+                        <div class="stat-item highlight">
+                            <span class="stat-label">最大向下动量</span>
+                            <span class="stat-value" id="rightMaxMomentumDown">-</span>
+                        </div>
+                        <div class="stat-item highlight">
+                            <span class="stat-label">最大向上动量</span>
+                            <span class="stat-value" id="rightMaxMomentumUp">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 图表 -->
+                <div class="charts-container">
+                    <div class="chart-wrapper">
+                        <h3>📍 手腕高度变化</h3>
+                        <canvas id="heightChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h3>⚡ 动量变化曲线</h3>
+                        <canvas id="momentumChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- 关键帧图片 -->
+                <div class="keyframes-section" id="keyframesSection" style="display: none;">
+                    <h3>📸 最大落下动量动作分析 - 手臂从高点到低点</h3>
+
+                    <!-- 动量计算公式说明 -->
+                    <div class="formula-card">
+                        <h4>📐 动量计算公式</h4>
+                        <div class="formula-content">
+                            <div class="formula-item">
+                                <span class="formula">p = m × v</span>
+                                <span class="formula-desc">动量 (kg·m/s) = 质量 (kg) × 速度 (m/s)</span>
+                            </div>
+                            <div class="formula-item">
+                                <span class="formula">v = (y₂ - y₁) / Δt</span>
+                                <span class="formula-desc">速度 = 位置变化 / 时间间隔</span>
+                            </div>
+                            <div class="formula-note">
+                                <span>• 向下动量为正值（+），表示手臂下落</span>
+                                <span>• 手臂质量假设 m = 1 kg</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 分栏布局：左侧日志+表格，右侧视频 -->
+                    <div class="split-view-container">
+                        <!-- 左侧：动作表格和日志 -->
+                        <div class="left-panel">
+                            <!-- 所有落下动作记录表格 -->
+                            <div class="cycles-table-card" id="cyclesTableCard" style="display: none;">
+                                <div class="table-header">
+                                    <h4>📋 所有落下动作记录（点击行跳转视频）</h4>
+                                    <span class="total-count">共 <span id="totalCycles">0</span> 次动作</span>
+                                </div>
+                                <div class="table-wrapper">
+                                    <table class="cycles-table">
+                                        <thead>
+                                            <tr>
+                                                <th>序号</th>
+                                                <th>开始帧</th>
+                                                <th>高点帧</th>
+                                                <th>低点帧</th>
+                                                <th>高度差</th>
+                                                <th>落下动量</th>
+                                                <th>时长</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="cyclesTableBody">
+                                            <!-- 动态插入 -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 日志文件内容 -->
+                            <div class="log-file-card">
+                                <div class="table-header">
+                                    <h4>📄 动作日志</h4>
+                                </div>
+                                <div class="log-content" id="logContent">
+                                    <!-- 日志内容动态插入 -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 右侧：视频播放器 -->
+                        <div class="right-panel">
+                            <div class="video-section">
+                                <h3>🎬 原始视频（点击表格行播放片段）</h3>
+                                <div class="video-container">
+                                    <video id="outputVideo" controls>
+                                        您的浏览器不支持视频播放
+                                    </video>
+                                </div>
+                            </div>
+
+                            <!-- 两张关键帧并排显示 -->
+                    <div class="motion-container" id="motionContainer" style="display: none;">
+                        <div class="frames-row">
+                            <!-- 高点图片 -->
+                            <div class="frame-card high-point-card">
+                                <div class="frame-badge high-badge">起点 - 高点</div>
+                                <img id="highPointImage" src="" alt="高点">
+                                <div class="frame-info">
+                                    <div class="info-row">
+                                        <span class="info-label">高度</span>
+                                        <span class="info-value" id="highPointHeight">-</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="info-label">帧号</span>
+                                        <span class="info-value" id="highPointFrame">-</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 箭头连接 -->
+                            <div class="motion-connector">
+                                <div class="arrow-body"></div>
+                                <div class="arrow-head">▼</div>
+                                <div class="duration-label" id="connectorDuration">3.9s</div>
+                            </div>
+
+                            <!-- 低点图片 -->
+                            <div class="frame-card low-point-card">
+                                <div class="frame-badge low-badge">终点 - 低点</div>
+                                <img id="lowPointImage" src="" alt="低点">
+                                <div class="frame-info">
+                                    <div class="info-row">
+                                        <span class="info-label">高度</span>
+                                        <span class="info-value" id="lowPointHeight">-</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="info-label">帧号</span>
+                                        <span class="info-value" id="lowPointFrame">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 统计数据面板 -->
+                        <div class="motion-stats">
+                            <div class="stat-card-main">
+                                <div class="stat-icon">⚡</div>
+                                <div class="stat-content">
+                                    <div class="stat-label">落下动量</div>
+                                    <div class="stat-value-large" id="motionMomentum">-</div>
+                                </div>
+                            </div>
+                            <div class="stat-card-main">
+                                <div class="stat-icon">📏</div>
+                                <div class="stat-content">
+                                    <div class="stat-label">高度差</div>
+                                    <div class="stat-value-large" id="motionHeightChange">-</div>
+                                </div>
+                            </div>
+                            <div class="stat-card-main">
+                                <div class="stat-icon">⏱️</div>
+                                <div class="stat-content">
+                                    <div class="stat-label">动作时长</div>
+                                    <div class="stat-value-large" id="motionDuration">-</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="action-buttons">
+                    <button class="btn-secondary" onclick="resetUpload()">
+                        🔄 上传新视频
+                    </button>
+                    <button class="btn-secondary" onclick="downloadAnalysis()">
+                        📥 下载分析数据
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>基于 MediaPipe 姿态检测技术 | Python Flask 后端</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
