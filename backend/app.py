@@ -212,8 +212,15 @@ class SwingAnalyzer:
           velocity > 0  = 手臂向上运动
           velocity < 0  = 手臂向下运动
 
+        计数规则（修正版）：
+          - 落下（down_cycle）：手臂落到最低点后速度反转向上时确认，
+            记录本次落下的 peak→trough 数据
+          - 上抬（up_cycle）：手臂升到最高点后速度反转向下时确认，
+            记录本次上抬的 trough→peak 数据
+
         状态流转：
-          unknown → at_peak ←→ falling → at_trough ←→ rising → at_peak
+          unknown → at_peak/at_trough
+          at_peak  → [确认上抬] → falling  → at_trough → [确认落下] → rising → at_peak
 
         返回: (down_cycles, up_cycles)
           down_cycles: 每次落下（peak→trough）的数据
@@ -228,17 +235,27 @@ class SwingAnalyzer:
         # ── 2. 中心差分计算速度（精度高于前向差分）──────────────────────────
         velocity = self._compute_velocity(smoothed_y, fps)
 
-        # ── 3. 阈值设定 ──────────────────────────────────────────────────────
-        VEL_THRESHOLD = 8.0      # height%/s，触发方向判定的最小速度
-        HIGH_THRESHOLD = 55.0    # 高于此值视为"高位"
-        LOW_THRESHOLD = 45.0     # 低于此值视为"低位"
-        MIN_HEIGHT_CHANGE = 8.0  # 有效周期的最小幅度（%）
+        # ── 3. 自适应阈值（基于实际运动范围）────────────────────────────────
+        valid_y = [y for y in smoothed_y if y is not None]
+        if len(valid_y) < 20:
+            return [], []
+        y_mean = float(np.mean(valid_y))
+        y_std = float(np.std(valid_y))
+        # 用均值±0.3σ作为高/低位判断，最小间距保证不小于10%
+        half_band = max(0.3 * y_std, 5.0)
+        HIGH_THRESHOLD = y_mean + half_band   # 高于此视为"高位"
+        LOW_THRESHOLD  = y_mean - half_band   # 低于此视为"低位"
+
+        # 速度阈值
+        VEL_STRONG = 6.0  # 明显运动（触发 at_peak/at_trough → falling/rising）
+        VEL_WEAK   = 2.0  # 弱反转（触发 falling/rising → at_trough/at_peak）
+        MIN_HEIGHT_CHANGE = 8.0  # 有效周期最小幅度（%）
 
         down_cycles = []
-        up_cycles = []
+        up_cycles   = []
 
         state = 'unknown'
-        peak_frame, peak_y = None, None
+        peak_frame,   peak_y   = None, None
         trough_frame, trough_y = None, None
 
         for i in range(len(smoothed_y)):
@@ -246,49 +263,94 @@ class SwingAnalyzer:
                 continue
 
             y = smoothed_y[i]
-            v = velocity[i]
+            v = velocity[i] if i < len(velocity) else 0.0
             shoulder = (shoulder_y[i]
                         if shoulder_y and i < len(shoulder_y) and shoulder_y[i] is not None
                         else None)
 
-            # ── 初始状态：根据当前位置确定起点 ───────────────────────────────
+            # ── 初始状态：根据位置或速度确定起点 ────────────────────────────
             if state == 'unknown':
                 if y >= HIGH_THRESHOLD:
                     state = 'at_peak'
                     peak_frame, peak_y = i, y
-                    trough_frame, trough_y = None, None
                 elif y <= LOW_THRESHOLD:
                     state = 'at_trough'
                     trough_frame, trough_y = i, y
-                    peak_frame, peak_y = None, None
+                elif v < -VEL_STRONG:          # 中间位置但明显在下落
+                    state = 'falling'
+                    peak_frame,   peak_y   = i, y
+                    trough_frame, trough_y = i, y
+                elif v > VEL_STRONG:           # 中间位置但明显在上升
+                    state = 'rising'
+                    trough_frame, trough_y = i, y
+                    peak_frame,   peak_y   = i, y
 
             # ── 高位等待：持续更新最高点，等待开始下落 ───────────────────────
             elif state == 'at_peak':
                 if y > peak_y:
                     peak_frame, peak_y = i, y
-                # 速度明显向下 → 开始落下
-                if v < -VEL_THRESHOLD:
+                # 速度明显向下 → 确认上抬周期（如有），然后开始下落
+                if v < -VEL_STRONG:
+                    # 如果存在完整上抬数据，记录本次上抬
+                    if trough_frame is not None and peak_frame is not None:
+                        height_change = peak_y - trough_y
+                        if height_change >= MIN_HEIGHT_CHANGE:
+                            phase_vels = [velocity[k]
+                                          for k in range(trough_frame, peak_frame + 1)
+                                          if k < len(velocity) and velocity[k] > 0]
+                            avg_up = sum(phase_vels) / len(phase_vels) if phase_vels else 0.0
+                            max_up = max(phase_vels) if phase_vels else 0.0
+                            duration = (peak_frame - trough_frame) / fps
+                            up_cycles.append({
+                                'cycle_number': len(up_cycles) + 1,
+                                'type': 'up',
+                                'start_frame': trough_frame,
+                                'trough_frame': trough_frame,
+                                'peak_frame': peak_frame,
+                                'trough_y': float(trough_y),
+                                'peak_y': float(peak_y),
+                                'height_change': float(height_change),
+                                'avg_momentum': float(avg_up),
+                                'max_momentum': float(max_up),
+                                'duration': float(duration)
+                            })
+                            logger.info(
+                                f"[上抬 #{len(up_cycles)}] "
+                                f"低点帧{trough_frame}(Y={trough_y:.1f}%) → "
+                                f"高点帧{peak_frame}(Y={peak_y:.1f}%), "
+                                f"幅度={height_change:.1f}%, "
+                                f"平均动量={avg_up:.2f}, 峰值动量={max_up:.2f}"
+                            )
+                    # 转入下落，重置低点追踪
                     state = 'falling'
-                    trough_frame, trough_y = i, y  # 初始化低点跟踪
+                    trough_frame, trough_y = i, y
 
-            # ── 下落中：持续追踪最低点，等待速度反转 ────────────────────────
+            # ── 下落中：持续追踪最低点，等待速度反转为正 ────────────────────
+            # （不在此处记录落下，确保捕获到真正最低点后再统计）
             elif state == 'falling':
                 if y < trough_y:
                     trough_frame, trough_y = i, y
-                # 速度反转（向上）或已到低位 → 结束本次落下
-                if v > VEL_THRESHOLD / 2 or y <= LOW_THRESHOLD:
+                # 速度开始向上（弱阈值）→ 到达最低点，进入低位等待
+                if v > VEL_WEAK:
+                    state = 'at_trough'
+
+            # ── 低位等待：持续更新最低点，等待开始上抬 ───────────────────────
+            elif state == 'at_trough':
+                if trough_frame is None or y < trough_y:
+                    trough_frame, trough_y = i, y
+                # 速度明显向上 → 确认落下周期（如有），然后开始上抬
+                if v > VEL_STRONG:
+                    # 如果存在完整落下数据，记录本次落下
                     if peak_frame is not None and trough_frame is not None:
                         height_change = peak_y - trough_y
                         above_shoulder = (shoulder is None or peak_y > shoulder)
                         if height_change >= MIN_HEIGHT_CHANGE:
-                            # 只取落下阶段的负速度（向下）
                             phase_vels = [velocity[k]
                                           for k in range(peak_frame, trough_frame + 1)
                                           if k < len(velocity) and velocity[k] < 0]
                             avg_down = abs(sum(phase_vels) / len(phase_vels)) if phase_vels else 0.0
                             max_down = abs(min(phase_vels)) if phase_vels else 0.0
                             duration = (trough_frame - peak_frame) / fps
-
                             down_cycles.append({
                                 'cycle_number': len(down_cycles) + 1,
                                 'type': 'down',
@@ -310,59 +372,18 @@ class SwingAnalyzer:
                                 f"幅度={height_change:.1f}%, "
                                 f"平均动量={avg_down:.2f}, 峰值动量={max_down:.2f}"
                             )
-
-                    state = 'at_trough'
-                    peak_frame, peak_y = None, None
-
-            # ── 低位等待：持续更新最低点，等待开始上抬 ───────────────────────
-            elif state == 'at_trough':
-                if trough_frame is None or y < trough_y:
-                    trough_frame, trough_y = i, y
-                # 速度明显向上 → 开始上抬
-                if v > VEL_THRESHOLD:
+                    # 转入上抬，重置高点追踪
                     state = 'rising'
-                    peak_frame, peak_y = i, y  # 初始化高点跟踪
+                    peak_frame, peak_y = i, y
 
-            # ── 上抬中：持续追踪最高点，等待速度反转 ────────────────────────
+            # ── 上抬中：持续追踪最高点，等待速度反转为负 ────────────────────
+            # （不在此处记录上抬，确保捕获到真正最高点后再统计）
             elif state == 'rising':
                 if peak_frame is None or y > peak_y:
                     peak_frame, peak_y = i, y
-                # 速度反转（向下）或已到高位 → 结束本次上抬
-                if v < -VEL_THRESHOLD / 2 or y >= HIGH_THRESHOLD:
-                    if trough_frame is not None and peak_frame is not None:
-                        height_change = peak_y - trough_y
-                        if height_change >= MIN_HEIGHT_CHANGE:
-                            # 只取上抬阶段的正速度（向上）
-                            phase_vels = [velocity[k]
-                                          for k in range(trough_frame, peak_frame + 1)
-                                          if k < len(velocity) and velocity[k] > 0]
-                            avg_up = sum(phase_vels) / len(phase_vels) if phase_vels else 0.0
-                            max_up = max(phase_vels) if phase_vels else 0.0
-                            duration = (peak_frame - trough_frame) / fps
-
-                            up_cycles.append({
-                                'cycle_number': len(up_cycles) + 1,
-                                'type': 'up',
-                                'start_frame': trough_frame,
-                                'trough_frame': trough_frame,
-                                'peak_frame': peak_frame,
-                                'trough_y': float(trough_y),
-                                'peak_y': float(peak_y),
-                                'height_change': float(height_change),
-                                'avg_momentum': float(avg_up),
-                                'max_momentum': float(max_up),
-                                'duration': float(duration)
-                            })
-                            logger.info(
-                                f"[上抬 #{len(up_cycles)}] "
-                                f"低点帧{trough_frame}(Y={trough_y:.1f}%) → "
-                                f"高点帧{peak_frame}(Y={peak_y:.1f}%), "
-                                f"幅度={height_change:.1f}%, "
-                                f"平均动量={avg_up:.2f}, 峰值动量={max_up:.2f}"
-                            )
-
+                # 速度开始向下（弱阈值）→ 到达最高点，进入高位等待
+                if v < -VEL_WEAK:
                     state = 'at_peak'
-                    trough_frame, trough_y = None, None
 
         return down_cycles, up_cycles
 
@@ -822,6 +843,12 @@ class SwingAnalyzer:
         right_down, right_up = self.find_all_cycles(
             self.data['right_wrist_y'], fps, self.data['right_shoulder_y'])
 
+        # 给每个周期打上左/右手标签
+        for c in left_down:  c['hand'] = 'left'
+        for c in left_up:    c['hand'] = 'left'
+        for c in right_down: c['hand'] = 'right'
+        for c in right_up:   c['hand'] = 'right'
+
         self.data['left_down_cycles'] = left_down
         self.data['left_up_cycles'] = left_up
         self.data['right_down_cycles'] = right_down
@@ -857,9 +884,20 @@ class SwingAnalyzer:
                 frames_buffer, y_data, momentum_data, output_frames_dir, fps, all_down_cycles
             )
 
+            # 合并左右手周期，按起始帧排序，方便前端按时间顺序展示
+            combined_down = sorted(
+                self.data['left_down_cycles'] + self.data['right_down_cycles'],
+                key=lambda c: c.get('start_frame', 0)
+            )
+            combined_up = sorted(
+                self.data['left_up_cycles'] + self.data['right_up_cycles'],
+                key=lambda c: c.get('start_frame', 0)
+            )
+            # key_frames 里的 all_down_cycles 也同步为合并后数据
+            key_frames_data['all_down_cycles'] = combined_down
             self.data['key_frames'] = key_frames_data
-            self.data['all_down_cycles'] = all_down_cycles
-            self.data['all_up_cycles'] = all_up_cycles
+            self.data['all_down_cycles'] = combined_down
+            self.data['all_up_cycles'] = combined_up
             logger.info("关键帧提取完成")
 
         logger.info(f"分析完成！共处理 {frame_idx} 帧")

@@ -207,9 +207,12 @@ function displayKeyFrames(keyFrames) {
             row.title = `点击播放：帧 ${cycle.start_frame} → ${endFrame}`;
 
             const typeLabel = isDown ? '↓ 落下' : '↑ 上抬';
+            const handLabel = cycle.hand === 'left' ? '👈 左手' : cycle.hand === 'right' ? '👉 右手' : '-';
+            const handClass = cycle.hand === 'left' ? 'badge-left' : cycle.hand === 'right' ? 'badge-right' : '';
 
             row.innerHTML = `
                 <td>${idx + 1}</td>
+                <td><span class="type-badge ${handClass}">${handLabel}</span></td>
                 <td><span class="type-badge ${isDown ? 'badge-down' : 'badge-up'}">${typeLabel}</span></td>
                 <td>${cycle.start_frame}</td>
                 <td>${cycle.peak_frame !== undefined ? cycle.peak_frame : '-'}</td>
