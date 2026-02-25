@@ -843,6 +843,12 @@ class SwingAnalyzer:
         right_down, right_up = self.find_all_cycles(
             self.data['right_wrist_y'], fps, self.data['right_shoulder_y'])
 
+        # 给每个周期打上左/右手标签
+        for c in left_down:  c['hand'] = 'left'
+        for c in left_up:    c['hand'] = 'left'
+        for c in right_down: c['hand'] = 'right'
+        for c in right_up:   c['hand'] = 'right'
+
         self.data['left_down_cycles'] = left_down
         self.data['left_up_cycles'] = left_up
         self.data['right_down_cycles'] = right_down
@@ -878,9 +884,20 @@ class SwingAnalyzer:
                 frames_buffer, y_data, momentum_data, output_frames_dir, fps, all_down_cycles
             )
 
+            # 合并左右手周期，按起始帧排序，方便前端按时间顺序展示
+            combined_down = sorted(
+                self.data['left_down_cycles'] + self.data['right_down_cycles'],
+                key=lambda c: c.get('start_frame', 0)
+            )
+            combined_up = sorted(
+                self.data['left_up_cycles'] + self.data['right_up_cycles'],
+                key=lambda c: c.get('start_frame', 0)
+            )
+            # key_frames 里的 all_down_cycles 也同步为合并后数据
+            key_frames_data['all_down_cycles'] = combined_down
             self.data['key_frames'] = key_frames_data
-            self.data['all_down_cycles'] = all_down_cycles
-            self.data['all_up_cycles'] = all_up_cycles
+            self.data['all_down_cycles'] = combined_down
+            self.data['all_up_cycles'] = combined_up
             logger.info("关键帧提取完成")
 
         logger.info(f"分析完成！共处理 {frame_idx} 帧")

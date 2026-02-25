@@ -455,6 +455,16 @@ header p {
     color: #2563eb;
     border: 1px solid #bfdbfe;
 }
+.badge-left {
+    background: #f5f3ff;
+    color: #7c3aed;
+    border: 1px solid #ddd6fe;
+}
+.badge-right {
+    background: #f0fdf4;
+    color: #16a34a;
+    border: 1px solid #bbf7d0;
+}
 
 .cycles-table tbody tr:hover {
     background: #f8fafc;
