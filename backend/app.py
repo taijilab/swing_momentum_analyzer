@@ -6,12 +6,13 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 import os
-import cv2
-import mediapipe as mp
 import numpy as np
 from pathlib import Path
 import json
 import logging
+
+# cv2 和 mediapipe 为懒加载——仅在 analyze_video() 首次调用时导入，
+# 避免 Vercel serverless 冷启动时因共享库缺失而崩溃。
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -41,16 +42,10 @@ class SwingAnalyzer:
     """甩手动作分析器"""
 
     def __init__(self):
-        # 初始化 MediaPipe 姿态检测
-        self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.mp_drawing = mp.solutions.drawing_utils
+        # MediaPipe 组件（懒加载，首次 analyze_video 调用时初始化）
+        self.mp_pose = None
+        self.pose = None
+        self.mp_drawing = None
 
         # MediaPipe 关键点索引
         self.LEFT_SHOULDER = 11
@@ -71,6 +66,20 @@ class SwingAnalyzer:
             'right_momentum': [],
             'swing_events': []
         }
+
+    def _init_vision(self):
+        """懒加载 cv2 和 MediaPipe，仅在首次视频处理时执行一次。"""
+        if self.pose is None:
+            import mediapipe as mp
+            self.mp_pose = mp.solutions.pose
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_drawing = mp.solutions.drawing_utils
 
     def calculate_velocity(self, positions, fps=30):
         """计算速度 (位置变化率)"""
@@ -422,6 +431,7 @@ class SwingAnalyzer:
         创建向下运动的两张关键帧图片（高点和低点）
         只绘制左手骨架，标注统计信息
         """
+        import cv2
         import base64
 
         peak_frame_idx = cycle_info['peak_frame']
@@ -530,6 +540,7 @@ class SwingAnalyzer:
 
     def _add_info_panel_high(self, frame, frame_idx, height, duration):
         """在高点图片上添加信息面板"""
+        import cv2
         h, w = frame.shape[:2]
 
         # 半透明深色背景面板
@@ -558,6 +569,7 @@ class SwingAnalyzer:
 
     def _add_info_panel_low(self, frame, frame_idx, height, momentum, height_change, duration):
         """在低点图片上添加信息面板"""
+        import cv2
         h, w = frame.shape[:2]
 
         # 半透明深色背景面板
@@ -593,6 +605,7 @@ class SwingAnalyzer:
         """
         创建带标注的关键帧
         """
+        import cv2
         import base64
 
         annotated = frame.copy()
@@ -640,6 +653,7 @@ class SwingAnalyzer:
         参数:
         - all_cycles: 所有检测到的落下动作列表，用于前端表格显示
         """
+        import cv2
         import base64
 
         key_frames_data = {
@@ -701,6 +715,8 @@ class SwingAnalyzer:
 
     def analyze_video(self, video_path, output_video_path=None, output_frames_dir=None):
         """分析视频中的甩手动作"""
+        import cv2
+        self._init_vision()
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
